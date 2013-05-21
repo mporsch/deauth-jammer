@@ -1,0 +1,5 @@
+deauth-jammer - listen for AP beacons and send deauthentication frames to its clients
+
+training project for using libpcap and parsing 802.11 frames in userspace
+
+based on packetjammer by Andy Green <andy@warmcat.com>
