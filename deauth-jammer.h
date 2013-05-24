@@ -63,9 +63,9 @@ typedef u32 __bitwise le32;
 struct ieee80211_mgmt {
 	le16 frame_control;
 	le16 duration;
-	u8 da[6];
-	u8 sa[6];
-	u8 bssid[6];
+	u8 da[ETH_ALEN];
+	u8 sa[ETH_ALEN];
+	u8 bssid[ETH_ALEN];
 	le16 seq_ctrl;
 	union {
 //		struct {

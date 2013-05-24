@@ -3,3 +3,6 @@ deauth-jammer - listen for AP beacons and send deauthentication frames to its cl
 training project for using libpcap and parsing 802.11 frames in userspace
 
 based on packetjammer by Andy Green <andy@warmcat.com>
+
+
+mind that injection is permitted on channels that permit IBSS, PASSIVE_SCAN or require RADAR detection (check with iw list)
